@@ -1,0 +1,54 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# BEEtexting Token Service — production compose stack
+#
+# Runs a single container that caches BEEtexting OAuth2 tokens and serves them
+# via GET /api/v1/token.  The host port is bound to 127.0.0.1 ONLY, so the
+# service is never reachable from the public internet — only sibling services
+# on the same Docker host can call it.
+#
+# Sibling services on the same host can join the
+# `beetexting-token-service_default` network to reach this container by its
+# DNS name `beetexting-token-service:8100`.
+#
+# Start/update:
+#     docker compose pull
+#     docker compose up -d
+#
+# View logs:
+#     docker compose logs -f
+# ──────────────────────────────────────────────────────────────────────────────
+
+services:
+  beetexting-token-service:
+    image: ghcr.io/ansimran/beetexting-token-service/token-service:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: beetexting-token-service
+    env_file: .env                                     # Secrets live in .env on the server, never committed.
+    environment:
+      APP_HOST: 0.0.0.0                                # Bind inside the container to all interfaces…
+      APP_PORT: 8100                                   # …on port 8100.
+      LOG_LEVEL: INFO                                  # Application log level.
+      ACCESS_LOG_LEVEL: INFO                           # Uvicorn HTTP access log level (every request logged).
+      TOKEN_REFRESH_BUFFER_SECONDS: 300                # Refresh token 5 min before expiry.
+    ports:
+      - "127.0.0.1:8100:8100"                          # Host side: localhost ONLY (not public internet).
+    restart: unless-stopped                            # Auto-restart on crash, stay down if stopped manually.
+    networks:
+      - default
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request, sys; sys.exit(0) if urllib.request.urlopen('http://127.0.0.1:8100/api/v1/ping', timeout=3).status == 200 else sys.exit(1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"                                # Cap each log file at 10 MB…
+        max-file: "3"                                  # …and keep at most 3 rotated files.
+
+networks:
+  default:
+    name: beetexting-token-service_default             # Sibling services can join this network by name.

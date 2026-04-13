@@ -101,6 +101,10 @@ The token is refreshed **5 minutes before expiry** by default (configurable via 
 
 ## Quick Start
 
+The service can run either directly on the host via `uv` (for development) or in a Docker container (for parity with production).
+
+### Option A — Native (local development)
+
 ```bash
 # 1. Install dependencies (requires uv — https://docs.astral.sh/uv/)
 uv sync --all-extras
@@ -117,6 +121,30 @@ uv run python main.py
 curl http://127.0.0.1:8100/api/v1/health
 curl http://127.0.0.1:8100/api/v1/token
 ```
+
+### Option B — Docker (matches production)
+
+```bash
+# 1. Configure credentials (same .env file, docker compose reads it)
+cp .env.example .env
+# Edit .env with your real BEEtexting credentials
+
+# 2. Build and start
+docker compose up -d --build
+
+# 3. Check the container is healthy
+docker compose ps
+docker compose logs -f
+
+# 4. Hit the endpoints
+curl http://127.0.0.1:8100/api/v1/health
+curl http://127.0.0.1:8100/api/v1/token
+
+# 5. Stop
+docker compose down
+```
+
+> **Production note:** The service is already deployed and running on an EC2 server. See the [Deployment](#deployment) section below for details.
 
 ---
 
@@ -207,21 +235,60 @@ All values are validated at startup via **Pydantic Settings**. If a required var
 
 ## Usage from Another Service
 
-Sibling microservices call the token endpoint to get a ready-to-use token:
+Sibling services call the token endpoint to get a ready-to-use Bearer token + API key. There are two ways to reach the Token Service, depending on where your service runs.
+
+### Scenario 1 — Sibling is a Docker container on the same host (recommended)
+
+This is how the production deployment works. Any sibling container (e.g. the SMS sender) joins the external network `beetexting-token-service_default` and reaches the Token Service by its container DNS name:
+
+**Sibling's `docker-compose.yml`:**
+
+```yaml
+services:
+  my-sms-sender:
+    image: ghcr.io/your-org/my-sms-sender:latest
+    environment:
+      TOKEN_SERVICE_URL: http://beetexting-token-service:8100
+    networks:
+      - beetexting-token-service_default     # Join the Token Service's network
+
+networks:
+  beetexting-token-service_default:
+    external: true                           # Created by the Token Service stack
+```
+
+**Sibling's code:**
+
+```python
+import httpx, os
+
+response = httpx.get(f"{os.environ['TOKEN_SERVICE_URL']}/api/v1/token")
+data = response.json()
+
+token   = data["access_token"]   # → Authorization: Bearer <token>
+api_key = data["api_key"]        # → x-api-key: <api_key>
+```
+
+### Scenario 2 — Caller is a plain process on the host (no container)
+
+If something runs directly on the EC2 host (a cron job, a shell script, a one-off Python process), it reaches the service via the loopback interface:
 
 ```python
 import httpx
 
-# Fetch token from the Token Service
 response = httpx.get("http://127.0.0.1:8100/api/v1/token")
 data = response.json()
 
-# Use these in your BEEtexting API calls:
-token   = data["access_token"]      # → Authorization: Bearer <token>
-api_key = data["api_key"]           # → x-api-key: <api_key>
-expires = data["expires_at_utc"]    # → know when it goes stale
+token   = data["access_token"]
+api_key = data["api_key"]
+expires = data["expires_at_utc"]    # know when it goes stale
+```
 
-# Example: send an SMS via BEEtexting
+### Full example — send an SMS via BEEtexting
+
+Once you have the token + api_key from either scenario above:
+
+```python
 sms_response = httpx.post(
     "https://connect.beetexting.com/prod/message/sendsms",
     headers={
@@ -364,12 +431,54 @@ BEEtexting uses 10-digit long code (10DLC) numbers. **Carriers enforce per-secon
 | Verizon | 1 MPS per number |
 | **Total** | **2.25 MPS** |
 
-#### What this means for us
+### RingCentral — the hidden third layer
+
+**This is the one that usually hurts.** BEEtexting is not a standalone SMS provider — it's a front-end that rides on top of **RingCentral's** messaging infrastructure. Every SMS you send through BEEtexting is ultimately handed to RingCentral, which then hands it to the carrier. That means **three layers of rate limits stack on top of each other**:
+
+```
+Your request
+   │
+   ▼
+BEEtexting       (plan-level monthly cap + pricing)
+   │
+   ▼
+RingCentral      ← often the tightest bottleneck
+   │
+   ▼
+Carrier 10DLC    (MPS by Trust Score)
+```
+
+RingCentral's published SMS limits:
+
+| Item | Value |
+|------|-------|
+| **Standard SMS API** | **40 messages per minute per number** (~0.67 MPS) |
+| **High-Volume A2P SMS API** (10DLC / Toll-Free) | Up to **250,000 messages per day**, > 3 MPS sustained |
+| **Rate limiting scope** | Per phone number (standard) / per account (A2P) |
+| **Enforcement** | HTTP `429 Too Many Requests` when exceeded |
+
+### Effective rate ceiling
+
+The real ceiling for any given message is the **minimum** of the three layers:
+
+```
+effective_mps = min(
+    BEEtexting_plan_ceiling,       # usually fine, plan-gated
+    RingCentral_tier_ceiling,      # 40 msg/min = 0.67 MPS on standard
+    Carrier_10DLC_throughput,      # 4-75 MPS based on Trust Score
+)
+```
+
+For a typical account on RingCentral's standard SMS API (not the High-Volume A2P tier), **the effective ceiling is RingCentral's 40 msg/min**, regardless of how favourable your carrier 10DLC Trust Score is. The 4–75 MPS carrier numbers in the table above are the theoretical ceiling — you will not hit them unless you're on RingCentral's High-Volume A2P tier.
+
+### What this means for us
 
 - **Token requests are not a concern.** We make ~1 request/hour. Any rate limit is orders of magnitude above that.
-- **Message throughput is carrier-gated**, not API-gated. The real limit is 4–75 MPS per carrier depending on Trust Score.
-- **Monthly volume is plan-gated.** 1,000 included messages, then $0.04/msg overage.
+- **Message throughput is likely RingCentral-gated, not carrier-gated.** If we ever need to burst-send, we must confirm the RingCentral plan behind the BEEtexting account supports High-Volume A2P, otherwise we're capped at 40 msg/min.
+- **Monthly volume is BEEtexting-plan-gated.** 1,000 included messages, then $0.04/msg overage.
 - **Our `TOKEN_REFRESH_BUFFER_SECONDS=300` is correct.** One fresh token per hour is optimal.
+
+> **Sources:** [RingCentral API Rate Limits (developer docs)](https://developers.ringcentral.com/guide/basics/rate-limits), [RingCentral High-Volume A2P SMS API reference](https://developers.ringcentral.com/api-reference/High-Volume-SMS/createA2PSMS), [Understanding RingCentral rate limits (Medium)](https://medium.com/ringcentral-developers/understanding-api-rate-limits-in-ringcentral-and-how-to-manage-them-ffe04747268d).
 
 ---
 
@@ -428,6 +537,103 @@ uv run ruff check src/ tests/
 | `test_config.py` | Settings validation, defaults, field constraints |
 | `test_token_manager.py` | Token fetch, retry logic, expiry, background refresh timing, Pydantic model validation (frozen, repr, min_length, aliases, is_expired) |
 | `test_api.py` | API endpoint responses (token, health, ping), error responses |
+
+---
+
+## Deployment
+
+The service is deployed to an AWS EC2 host and auto-updates on every push to `main`.
+
+### Production
+
+| Item | Value |
+|------|-------|
+| **Host** | EC2 `54.153.64.137` (user `ubuntu`, Ubuntu 24.04 LTS) |
+| **Container image** | `ghcr.io/ansimran/beetexting-token-service/token-service:latest` |
+| **Binding** | `127.0.0.1:8100` on the host — **never** exposed to the public internet |
+| **Docker network** | `beetexting-token-service_default` — sibling containers join this network to reach the service by DNS name |
+| **Restart policy** | `unless-stopped` (auto-recovers from crashes) |
+| **Healthcheck** | Docker polls `GET /api/v1/ping` every 30s, 5s timeout, 3 retries |
+| **Log rotation** | JSON driver, 10 MB per file, 3 files retained |
+
+### CI/CD pipeline
+
+Every push to `main` triggers [`.github/workflows/ci.yml`](.github/workflows/ci.yml), which runs three sequential jobs:
+
+1. **Test** — `uv sync --all-extras` → `ruff check` → `pytest -v`. Runs on every push and every pull request.
+2. **Build and push image** — Builds the Docker image via `docker/build-push-action` with registry-based layer caching, then pushes to GHCR. Only runs on pushes to `main`.
+3. **Deploy to server** — SSHes into EC2 as `ubuntu`, runs `git pull`, `docker compose pull`, `docker compose up -d --remove-orphans`, prunes old images, and hits `/api/v1/ping` + `/api/v1/health` to verify the new container is healthy before the job succeeds.
+
+### Smart rebuild logic — don't restart the container for doc-only changes
+
+The workflow has **two layers** of protection against unnecessary container restarts when a commit only touches docs:
+
+1. **`paths-ignore` on the push trigger** — the entire workflow is skipped when a commit only touches files matching `**.md`, `docs/**`, `.gitignore`, or `.env.example`. No CI runs, no image build, no deploy, no restart.
+
+2. **Deterministic builds as a safety net** — even if a mixed push does trigger the workflow, the [`.dockerignore`](.dockerignore) excludes `docs/`, `README.md`, `tests/`, and `.git/`, so the build context is identical to the previous run. Combined with `SOURCE_DATE_EPOCH=0`, `provenance: false`, and `sbom: false` in the build action, the resulting image digest is **byte-identical** to whatever is already on GHCR. When `docker compose pull` runs on the server, it sees no new image and leaves the running container untouched.
+
+### Required GitHub Secrets
+
+Six secrets power the deployment job (set via `gh secret set`):
+
+| Secret | Purpose |
+|--------|---------|
+| `DEPLOY_HOST` | EC2 hostname / IP |
+| `DEPLOY_USER` | SSH username (`ubuntu`) |
+| `DEPLOY_SSH_KEY` | Private SSH key contents (`bridge-ec2.pem`) |
+| `DEPLOY_GIT_PATH` | Absolute path to the cloned repo on the server |
+| `GHCR_USER` | GitHub username for GHCR login |
+| `GHCR_TOKEN` | GitHub PAT with `read:packages` scope |
+
+### Server-side one-time setup
+
+If you ever need to rebuild the server from scratch:
+
+```bash
+# 1. Clone the repo
+git clone https://github.com/AnsImran/beetexting-token-service.git ~/beetexting-token-service
+cd ~/beetexting-token-service
+
+# 2. Create .env with real secrets (never committed)
+# (Copy from a secure location or set values manually.)
+cp .env.example .env
+$EDITOR .env
+
+# 3. Log in to GHCR (one-time)
+echo "<PAT>" | docker login ghcr.io -u AnsImran --password-stdin
+
+# 4. Pull and start
+docker compose pull
+docker compose up -d
+```
+
+### Operational commands
+
+```bash
+# Tail logs (from your laptop)
+ssh -i credentials/bridge-ec2.pem ubuntu@54.153.64.137 \
+  "docker logs beetexting-token-service --tail 50 -f"
+
+# Check container status
+ssh -i credentials/bridge-ec2.pem ubuntu@54.153.64.137 \
+  "docker ps --filter name=beetexting-token-service"
+
+# Hit the endpoint from the server
+ssh -i credentials/bridge-ec2.pem ubuntu@54.153.64.137 \
+  "curl -sS http://127.0.0.1:8100/api/v1/health"
+
+# Manual redeploy (force latest image)
+ssh -i credentials/bridge-ec2.pem ubuntu@54.153.64.137 << 'EOF'
+cd ~/beetexting-token-service
+git pull
+docker compose pull
+docker compose up -d --remove-orphans
+EOF
+
+# Restart without pulling
+ssh -i credentials/bridge-ec2.pem ubuntu@54.153.64.137 \
+  "cd ~/beetexting-token-service && docker compose restart"
+```
 
 ---
 
@@ -505,6 +711,17 @@ beetexting_token_service/
 ├── .gitignore
 ├── README.md                                # This file
 │
+├── Dockerfile                               # python:3.12-slim, pinned deps, healthcheck
+├── .dockerignore                            # Keeps secrets + docs out of the build context
+├── docker-compose.yml                       # One service, host-bound 127.0.0.1:8100, named network
+│
+├── .github/
+│   └── workflows/
+│       └── ci.yml                           # test → build → push GHCR → SSH deploy
+│
+├── credentials/                             # SSH key + PAT (gitignored, local-only)
+│   └── bridge-ec2.pem                       # EC2 SSH private key
+│
 ├── src/
 │   ├── __init__.py
 │   ├── app.py                               # FastAPI factory + lifespan
@@ -566,15 +783,19 @@ The script extracts every ```` ```mermaid ```` block from `README.md` in order, 
 
 ## Tech Stack
 
-| Component | Technology | Version |
-|-----------|-----------|---------|
-| Runtime | Python | 3.12+ |
-| Web framework | FastAPI | 0.115+ |
-| HTTP server | Uvicorn | 0.34+ |
-| HTTP client | httpx | 0.28+ (async) |
-| Validation | Pydantic v2 | 2.10+ |
-| Configuration | pydantic-settings | 2.7+ |
-| Package manager | uv | latest |
-| Testing | pytest + pytest-asyncio | 8+ |
-| HTTP mocking | respx | 0.22+ |
-| Linting | ruff | 0.9+ |
+| Layer | Component | Technology | Version |
+|-------|-----------|-----------|---------|
+| **Runtime** | Language | Python | 3.12+ |
+| | Web framework | FastAPI | 0.115+ |
+| | HTTP server | Uvicorn | 0.34+ |
+| | HTTP client | httpx | 0.28+ (async) |
+| | Validation | Pydantic v2 | 2.10+ |
+| | Configuration | pydantic-settings | 2.7+ |
+| **Dev tools** | Package manager | uv | latest |
+| | Testing | pytest + pytest-asyncio | 8+ |
+| | HTTP mocking | respx | 0.22+ |
+| | Linting | ruff | 0.9+ |
+| **Deployment** | Container runtime | Docker + Docker Compose | 28+ / v2+ |
+| | CI/CD | GitHub Actions | — |
+| | Image registry | GitHub Container Registry (GHCR) | — |
+| | Production host | AWS EC2 (Ubuntu 24.04 LTS) | — |

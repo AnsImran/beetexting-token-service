@@ -8,7 +8,45 @@ Sibling microservices (e.g. the SMS sender, worklist service) call `GET /api/v1/
 
 ## Architecture
 
-![Architecture Diagram](docs/architecture.png)
+```mermaid
+flowchart LR
+    subgraph Internal["Internal Network (localhost only)"]
+        direction TB
+        SMS["SMS Sender<br/>:8200"]
+        WL["Worklist Service<br/>:8300"]
+        FS["Future Service N<br/>:8xxx"]
+
+        subgraph TS["BEEtexting Token Service — :8100"]
+            TM["<b>TokenManager</b><br/>Background refresh loop<br/>Holds one CachedToken"]
+        end
+    end
+
+    subgraph External["External (Internet)"]
+        direction TB
+        OAUTH["BEEtexting OAuth2<br/>auth.beetexting.com"]
+        SMSAPI["BEEtexting SMS API<br/>connect.beetexting.com"]
+    end
+
+    SMS -->|"1. GET /api/v1/token"| TS
+    WL -->|"1. GET /api/v1/token"| TS
+    FS -->|"1. GET /api/v1/token"| TS
+
+    TM ==>|"2. POST client_credentials<br/>(background, ~1/hour)"| OAUTH
+
+    SMS -.->|"3. Bearer + x-api-key"| SMSAPI
+    WL -.->|"3. Bearer + x-api-key"| SMSAPI
+    FS -.->|"3. Bearer + x-api-key"| SMSAPI
+
+    classDef service fill:#6366F1,stroke:#1E3A5F,color:#fff,font-weight:bold
+    classDef token fill:#3B7DD8,stroke:#1E3A5F,color:#fff,font-weight:bold
+    classDef oauth fill:#F59E0B,stroke:#1E3A5F,color:#1E3A5F,font-weight:bold
+    classDef api fill:#F97316,stroke:#1E3A5F,color:#fff,font-weight:bold
+
+    class SMS,WL,FS service
+    class TM token
+    class OAUTH oauth
+    class SMSAPI api
+```
 
 **How it works:**
 
@@ -22,7 +60,32 @@ The Token Service binds to **localhost only** (`127.0.0.1:8100`) — it is never
 
 ## Token Lifecycle
 
-![Token Lifecycle Diagram](docs/token_lifecycle.png)
+```mermaid
+flowchart TD
+    A["<b>1. STARTUP</b><br/>FastAPI lifespan boots<br/>TokenManager.start() called"]
+    B["<b>2. INITIAL FETCH</b><br/>POST client_credentials<br/>to BEEtexting OAuth2"]
+    C["<b>3. VALIDATE & CACHE</b><br/>BeeTextingTokenResponse validates JSON<br/>→ new CachedToken built<br/>→ atomic swap under asyncio.Lock"]
+    D["<b>4. SERVE CALLERS</b><br/>GET /api/v1/token<br/>returns cached token instantly<br/>(no upstream call)"]
+    E["<b>5. BACKGROUND REFRESH</b><br/>Sleep until expires_at − buffer<br/>(default: 5 min before expiry)"]
+
+    A --> B
+    B --> C
+    C --> D
+    D --> E
+    E -.->|"loop: ~1 refresh per hour"| B
+
+    classDef startup fill:#7C3AED,stroke:#1E3A5F,color:#fff,font-weight:bold
+    classDef fetch fill:#3B7DD8,stroke:#1E3A5F,color:#fff,font-weight:bold
+    classDef cache fill:#10B981,stroke:#1E3A5F,color:#fff,font-weight:bold
+    classDef serve fill:#6366F1,stroke:#1E3A5F,color:#fff,font-weight:bold
+    classDef refresh fill:#F59E0B,stroke:#1E3A5F,color:#1E3A5F,font-weight:bold
+
+    class A startup
+    class B fetch
+    class C cache
+    class D serve
+    class E refresh
+```
 
 | Phase | What happens |
 |-------|-------------|
@@ -370,10 +433,6 @@ uv run ruff check src/ tests/
 
 ## Project Structure
 
-![Project Structure Diagram](docs/project_structure.png)
-
-> The diagram above is rendered from the Mermaid source below. GitHub renders it natively; for offline viewing re-run `python docs/render_project_structure.py`.
-
 ```mermaid
 flowchart TB
     main["<b>main.py</b><br/>Entrypoint<br/>(uvicorn startup)"]
@@ -480,38 +539,28 @@ beetexting_token_service/
 │   └── test_api.py                          # API endpoint tests
 │
 └── docs/
-    ├── generate_diagrams.py                 # matplotlib → architecture + token_lifecycle (PNG + SVG)
-    ├── render_project_structure.py          # Mermaid → project_structure.png via mermaid.ink
-    ├── architecture.png / .svg              # High-level architecture
-    ├── token_lifecycle.png / .svg           # Token fetch / cache / refresh lifecycle
-    └── project_structure.png                # Module dependency map (rendered from README Mermaid block)
+    ├── render_diagrams.py                   # Extracts all ```mermaid blocks from README → PNG via mermaid.ink
+    ├── architecture.png                     # Rendered from README Mermaid block (offline copy)
+    ├── token_lifecycle.png                  # Rendered from README Mermaid block (offline copy)
+    └── project_structure.png                # Rendered from README Mermaid block (offline copy)
 ```
 
 ---
 
 ## Regenerating Diagrams
 
-The project uses **two different approaches** for diagrams:
+All three diagrams (`architecture`, `token_lifecycle`, `project_structure`) are defined as ```` ```mermaid ```` blocks directly in this README. **GitHub renders them natively** when viewing the README online — no image files needed for the web view.
 
-### 1. `architecture` and `token_lifecycle` — matplotlib
-
-These are hand-positioned diagrams generated with matplotlib. They output both PNG and SVG so they can be fine-tuned in Inkscape or Figma:
+The PNG copies in `docs/` exist purely for **offline viewing** (e.g. when you're browsing the repo on disk). To regenerate them after editing a Mermaid block:
 
 ```bash
-# Requires matplotlib (pip install matplotlib)
-python docs/generate_diagrams.py
+# Stdlib only — no matplotlib, no extra deps
+python docs/render_diagrams.py
 ```
 
-### 2. `project_structure` — Mermaid
+The script extracts every ```` ```mermaid ```` block from `README.md` in order, sends each one to [mermaid.ink](https://mermaid.ink), and saves the resulting PNGs to `docs/`. The order of diagrams in the README must match the `DIAGRAM_NAMES` list in [docs/render_diagrams.py](docs/render_diagrams.py).
 
-This one uses a Mermaid flowchart embedded directly in the README (see the [Project Structure](#project-structure) section). Mermaid handles layout automatically, so arrows never overlap and the diagram is trivial to update — just edit the ```` ```mermaid ```` block in the README and re-render:
-
-```bash
-# Stdlib only, no dependencies needed
-python docs/render_project_structure.py
-```
-
-This sends the Mermaid source to [mermaid.ink](https://mermaid.ink) and saves the PNG to `docs/project_structure.png`. GitHub also renders the Mermaid block natively when viewing the README online, so the PNG is only needed for offline viewing.
+**Why Mermaid instead of matplotlib?** Mermaid handles graph layout automatically — arrows never cross text, boxes never overlap, and LLMs can generate Mermaid source reliably. To tweak any diagram, just edit the Mermaid block in the README and re-run the script.
 
 ---
 

@@ -136,6 +136,7 @@ All settings are loaded from environment variables (or a `.env` file in the proj
 | `APP_HOST` | `127.0.0.1` | Host to bind to (localhost = internal only) |
 | `APP_PORT` | `8100` | Port to bind to (1024–65535) |
 | `LOG_LEVEL` | `INFO` | Logging verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` |
+| `ACCESS_LOG_LEVEL` | `INFO` | Uvicorn HTTP access log level — `INFO` shows every request, `WARNING` silences them |
 
 All values are validated at startup via **Pydantic Settings**. If a required variable is missing or a value is out of range, the service fails fast with a clear error message.
 
@@ -176,9 +177,17 @@ sms_response = httpx.post(
 
 ## Pydantic v2 Data Models
 
-All data flowing through the service is validated by Pydantic v2 models. Both internal models are **frozen** (immutable) to prevent accidental mutation, and `access_token` fields use `repr=False` to prevent token leaks in logs.
+All data flowing through the service is validated by Pydantic v2 models. Internal value objects (`BeeTextingTokenResponse`, `CachedToken`) are **frozen** (immutable), and `access_token` fields use `repr=False` so tokens never leak into logs.
 
-### `BeeTextingTokenResponse` — upstream API validation
+Schemas live in [src/schemas/](src/schemas/) split by domain:
+
+| File | Models |
+|------|--------|
+| [`token.py`](src/schemas/token.py) | `BeeTextingTokenResponse`, `CachedToken`, `TokenResponse` |
+| [`health.py`](src/schemas/health.py) | `HealthResponse` |
+| [`errors.py`](src/schemas/errors.py) | `ErrorDetail`, `ErrorResponse` |
+
+### `BeeTextingTokenResponse` — upstream API validation (internal)
 
 Validates the raw JSON from BEEtexting's OAuth2 endpoint before we trust it.
 
@@ -188,9 +197,9 @@ Validates the raw JSON from BEEtexting's OAuth2 endpoint before we trust it.
 | `token_type` | `str` | default `"Bearer"` | Always "Bearer" |
 | `expires_in` | `int` | `gt=0` | Seconds until expiry |
 
-Uses `populate_by_name=True` with explicit field aliases matching BEEtexting's JSON keys, so if their API ever renames a field, we change the alias — not our code.
+Uses `populate_by_name=True` with explicit field aliases matching BEEtexting's JSON keys, so if their API ever renames a field we update the alias, not our code.
 
-### `CachedToken` — in-memory state
+### `CachedToken` — in-memory state (internal)
 
 The single token object held by `TokenManager`. Created on every refresh, atomically swapped under an asyncio lock.
 
@@ -200,7 +209,44 @@ The single token object held by `TokenManager`. Created on every refresh, atomic
 | `token_type` | `str` | default `"Bearer"` | Always "Bearer" |
 | `expires_at_utc` | `datetime` | UTC-aware | When this token expires |
 | `fetched_at_utc` | `datetime` | UTC-aware | When this token was fetched |
-| `.is_expired` | `bool` (property) | — | `True` if current time >= expiry |
+| `.is_expired` | `bool` (property) | — | `True` if current time ≥ expiry |
+
+### `TokenResponse` — outbound, `GET /api/v1/token`
+
+The JSON body returned to sibling services.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ok` | `bool` (default `true`) | Request succeeded flag |
+| `access_token` | `str` | Bearer token to pass to BEEtexting |
+| `token_type` | `str` (default `"Bearer"`) | Token type |
+| `expires_at_utc` | `datetime` | When the token goes stale |
+| `api_key` | `str` | The `x-api-key` header value required alongside the Bearer token |
+
+### `HealthResponse` — outbound, `GET /api/v1/health`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `status` | `str` | `"healthy"` or `"degraded"` |
+| `has_valid_token` | `bool` | Whether a usable token is in memory |
+| `token_expires_at_utc` | `datetime \| None` | UTC expiry, or null if no token |
+
+### `ErrorResponse` / `ErrorDetail` — standard error envelope
+
+Every failure response (502, 503, 500) uses this shape:
+
+```json
+{
+  "ok": false,
+  "error": { "code": 503, "message": "No valid token is currently available." }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ok` | `bool` (default `false`) | Success flag |
+| `error.code` | `int` | HTTP status code |
+| `error.message` | `str` | Human-readable description |
 
 ---
 
@@ -286,8 +332,9 @@ Unhandled exceptions are caught by a generic handler that logs the full tracebac
 - **Format:** `2026-04-11T12:34:56.789+00:00 | INFO | module:func:42 | message`
 - **Timezone:** All timestamps are UTC with `+00:00` suffix
 - **Output:** stdout (for Docker / systemd capture)
-- **Level:** Configurable via `LOG_LEVEL` env var
-- **Noisy loggers suppressed:** `httpx`, `httpcore`, `uvicorn.access` set to `WARNING`
+- **App level:** Configurable via `LOG_LEVEL` env var (default `INFO`)
+- **HTTP access log:** Controlled separately via `ACCESS_LOG_LEVEL` (default `INFO` = every request is logged; set to `WARNING` in production to silence)
+- **Suppressed:** `httpx` and `httpcore` are pinned to `WARNING` to cut noise from the token-refresh HTTP calls
 
 ---
 
@@ -298,7 +345,7 @@ Unhandled exceptions are caught by a generic handler that logs the full tracebac
 uv run pytest -v
 
 # Run with coverage report
-uv run pytest --cov=beetexting_token_service --cov-report=term-missing
+uv run pytest --cov=src --cov-report=term-missing
 
 # Run only a specific test class
 uv run pytest tests/test_token_manager.py::TestCachedTokenSchema -v
@@ -309,7 +356,7 @@ uv run ruff check src/ tests/
 
 ### Test coverage
 
-- **37 tests** across 3 test files
+- **37 tests** across 3 test files (plus shared fixtures in `conftest.py`)
 - **85%+ code coverage**
 - All HTTP calls are mocked with `respx` — tests never touch real BEEtexting
 
@@ -395,21 +442,35 @@ beetexting_token_service/
 ├── main.py                                  # Entrypoint (uvicorn startup)
 ├── pyproject.toml                           # Dependencies, ruff, pytest config
 ├── .env.example                             # Environment variable template
+├── .env                                     # Real secrets (gitignored)
 ├── .gitignore
 ├── README.md                                # This file
 │
 ├── src/
-│   └── beetexting_token_service/
+│   ├── __init__.py
+│   ├── app.py                               # FastAPI factory + lifespan
+│   │
+│   ├── core/                                # Cross-cutting concerns
+│   │   ├── __init__.py
+│   │   ├── config.py                        # Pydantic Settings (all env vars, validated)
+│   │   ├── exceptions.py                    # Custom errors + FastAPI error handlers
+│   │   └── logging_config.py                # Structured UTC logging setup
+│   │
+│   ├── schemas/                             # Pydantic v2 models split by domain
+│   │   ├── __init__.py
+│   │   ├── token.py                         # BeeTextingTokenResponse, CachedToken, TokenResponse
+│   │   ├── health.py                        # HealthResponse
+│   │   └── errors.py                        # ErrorDetail, ErrorResponse
+│   │
+│   ├── services/                            # Business logic
+│   │   ├── __init__.py
+│   │   └── token_manager.py                 # TokenManager — fetch / cache / background refresh
+│   │
+│   └── api/
 │       ├── __init__.py
-│       ├── app.py                           # FastAPI factory + lifespan management
-│       ├── config.py                        # Pydantic Settings (all env vars, validated)
-│       ├── exceptions.py                    # Custom errors + FastAPI error handlers
-│       ├── logging_config.py                # Structured UTC logging setup
-│       ├── schemas.py                       # Pydantic v2 models (frozen, validated)
-│       ├── token_manager.py                 # Core: fetch, cache, background refresh
-│       └── api/
-│           └── v1/
-│               └── router.py               # Versioned API endpoints (/api/v1/...)
+│       └── v1/
+│           ├── __init__.py
+│           └── router.py                    # Versioned endpoints: /token /health /ping
 │
 ├── tests/
 │   ├── __init__.py
@@ -419,27 +480,38 @@ beetexting_token_service/
 │   └── test_api.py                          # API endpoint tests
 │
 └── docs/
-    ├── generate_diagrams.py                 # Script to regenerate the PNG diagrams
-    ├── architecture.png                     # High-level architecture diagram
-    ├── token_lifecycle.png                  # Token fetch/cache/refresh lifecycle
-    └── project_structure.png                # Module dependency map
+    ├── generate_diagrams.py                 # matplotlib → architecture + token_lifecycle (PNG + SVG)
+    ├── render_project_structure.py          # Mermaid → project_structure.png via mermaid.ink
+    ├── architecture.png / .svg              # High-level architecture
+    ├── token_lifecycle.png / .svg           # Token fetch / cache / refresh lifecycle
+    └── project_structure.png                # Module dependency map (rendered from README Mermaid block)
 ```
 
 ---
 
 ## Regenerating Diagrams
 
-The architecture diagrams are generated programmatically using matplotlib. To regenerate them after making changes:
+The project uses **two different approaches** for diagrams:
+
+### 1. `architecture` and `token_lifecycle` — matplotlib
+
+These are hand-positioned diagrams generated with matplotlib. They output both PNG and SVG so they can be fine-tuned in Inkscape or Figma:
 
 ```bash
 # Requires matplotlib (pip install matplotlib)
 python docs/generate_diagrams.py
 ```
 
-This outputs three PNGs into the `docs/` directory:
-- `architecture.png` — high-level service architecture
-- `token_lifecycle.png` — token fetch/cache/refresh flow with implementation details
-- `project_structure.png` — module dependency map
+### 2. `project_structure` — Mermaid
+
+This one uses a Mermaid flowchart embedded directly in the README (see the [Project Structure](#project-structure) section). Mermaid handles layout automatically, so arrows never overlap and the diagram is trivial to update — just edit the ```` ```mermaid ```` block in the README and re-render:
+
+```bash
+# Stdlib only, no dependencies needed
+python docs/render_project_structure.py
+```
+
+This sends the Mermaid source to [mermaid.ink](https://mermaid.ink) and saves the PNG to `docs/project_structure.png`. GitHub also renders the Mermaid block natively when viewing the README online, so the PNG is only needed for offline viewing.
 
 ---
 

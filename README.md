@@ -2,7 +2,7 @@
 
 Internal microservice that manages BEEtexting OAuth2 tokens. It fetches tokens via the **client-credentials** flow, caches them in memory as validated **Pydantic v2 models**, and **proactively refreshes** them before expiry using a background asyncio loop.
 
-Sibling microservices (e.g. the SMS sender, worklist service) call `GET /api/v1/token` to obtain a ready-to-use Bearer token instead of managing credentials themselves.
+> **Who calls this service?** In practice, **only the Message-Sending Service** (a sibling microservice that handles SMS today and will handle multimedia messaging in the future) talks to this token service. Every other internal service sends its messaging requests to the Message Service over internal auth (JWT/JWE), and the Message Service takes care of fetching a token from here and calling BEEtexting. This keeps BEEtexting credentials + token handling isolated behind a single message-dispatch choke point, so sibling services never need to know BEEtexting exists.
 
 ---
 
@@ -11,12 +11,18 @@ Sibling microservices (e.g. the SMS sender, worklist service) call `GET /api/v1/
 ```mermaid
 flowchart LR
     subgraph Internal["Internal Network (localhost only)"]
-        direction TB
-        SMS["SMS Sender<br/>:8200"]
-        WL["Worklist Service<br/>:8300"]
-        FS["Future Service N<br/>:8xxx"]
+        direction LR
 
-        subgraph TS["BEEtexting Token Service — :8100"]
+        subgraph Callers["Sibling Services (any service that needs to send a message)"]
+            direction TB
+            WL["Worklist Service"]
+            NOTIF["Notification Service"]
+            FS["Future Service N"]
+        end
+
+        MS["<b>Message-Sending Service</b><br/>SMS today, multimedia tomorrow<br/>The ONLY client of the Token Service"]
+
+        subgraph TS["<b>BEEtexting Token Service</b> — :8100 (THIS REPO)"]
             TM["<b>TokenManager</b><br/>Background refresh loop<br/>Holds one CachedToken"]
         end
     end
@@ -27,34 +33,41 @@ flowchart LR
         SMSAPI["BEEtexting SMS API<br/>connect.beetexting.com"]
     end
 
-    SMS -->|"1. GET /api/v1/token"| TS
-    WL -->|"1. GET /api/v1/token"| TS
-    FS -->|"1. GET /api/v1/token"| TS
+    WL -->|"1. POST /send (internal JWT/JWE)"| MS
+    NOTIF -->|"1. POST /send (internal JWT/JWE)"| MS
+    FS -->|"1. POST /send (internal JWT/JWE)"| MS
 
-    TM ==>|"2. POST client_credentials<br/>(background, ~1/hour)"| OAUTH
+    MS -->|"2. GET /api/v1/token"| TS
 
-    SMS -.->|"3. Bearer + x-api-key"| SMSAPI
-    WL -.->|"3. Bearer + x-api-key"| SMSAPI
-    FS -.->|"3. Bearer + x-api-key"| SMSAPI
+    TM ==>|"3. POST client_credentials<br/>(background, ~1/hour)"| OAUTH
 
-    classDef service fill:#6366F1,stroke:#1E3A5F,color:#fff,font-weight:bold
+    MS -.->|"4. Bearer + x-api-key"| SMSAPI
+
+    classDef caller fill:#6366F1,stroke:#1E3A5F,color:#fff,font-weight:bold
+    classDef message fill:#10B981,stroke:#1E3A5F,color:#fff,font-weight:bold
     classDef token fill:#3B7DD8,stroke:#1E3A5F,color:#fff,font-weight:bold
     classDef oauth fill:#F59E0B,stroke:#1E3A5F,color:#1E3A5F,font-weight:bold
     classDef api fill:#F97316,stroke:#1E3A5F,color:#fff,font-weight:bold
 
-    class SMS,WL,FS service
+    class WL,NOTIF,FS caller
+    class MS message
     class TM token
     class OAUTH oauth
     class SMSAPI api
 ```
 
-**How it works:**
+**How it works (numbered arrows above):**
 
-1. Sibling services call the Token Service (`GET /api/v1/token`) to get a cached Bearer token.
-2. The Token Service's background loop refreshes the token from BEEtexting's OAuth2 endpoint before it expires.
-3. Sibling services use the token directly against BEEtexting's SMS API (`connect.beetexting.com`).
+1. **Sibling services → Message Service.** Any internal service that needs to send a message (worklist, notifications, anything future) authenticates with an internal JWT/JWE and calls the Message Service. These services **never know BEEtexting exists**.
+2. **Message Service → Token Service.** On every outbound send, the Message Service fetches a cached Bearer token and API key from this repo via `GET /api/v1/token`.
+3. **Token Service ⇄ BEEtexting OAuth2.** A background loop inside the Token Service keeps a single fresh token in memory by posting `client_credentials` to BEEtexting's OAuth2 endpoint ~1/hour. Steps 1 and 2 above never block on this — they read from cache.
+4. **Message Service → BEEtexting SMS API.** Armed with the Bearer token + API key, the Message Service posts the actual SMS (or future multimedia) payload to `connect.beetexting.com`.
 
-The Token Service binds to **localhost only** (`127.0.0.1:8100`) — it is never exposed to the internet. Only internal services on the same server can reach it.
+**Security properties of this topology:**
+
+- **Single choke point for BEEtexting credentials.** Only the Message Service knows BEEtexting exists. If we ever rotate credentials, move to a different provider, or swap BEEtexting for something else, no sibling service has to change.
+- **Token Service is localhost-only.** It binds to `127.0.0.1:8100` on the EC2 host — never exposed to the public internet. Even the Message Service reaches it over the internal Docker network or loopback, not over the public network.
+- **Sibling services authenticate to the Message Service**, not to the Token Service. The Token Service has no auth of its own because only one trusted internal caller talks to it.
 
 ---
 
@@ -233,63 +246,71 @@ All values are validated at startup via **Pydantic Settings**. If a required var
 
 ---
 
-## Usage from Another Service
+## Who should call this service?
 
-Sibling services call the token endpoint to get a ready-to-use Bearer token + API key. There are two ways to reach the Token Service, depending on where your service runs.
+> **TL;DR — almost nothing should call this service directly.** If you're building a new microservice that needs to send a message, you want the **Message-Sending Service**, not this one. See the [Architecture](#architecture) section above.
 
-### Scenario 1 — Sibling is a Docker container on the same host (recommended)
+### For most services — don't call us, call the Message Service
 
-This is how the production deployment works. Any sibling container (e.g. the SMS sender) joins the external network `beetexting-token-service_default` and reaches the Token Service by its container DNS name:
-
-**Sibling's `docker-compose.yml`:**
-
-```yaml
-services:
-  my-sms-sender:
-    image: ghcr.io/your-org/my-sms-sender:latest
-    environment:
-      TOKEN_SERVICE_URL: http://beetexting-token-service:8100
-    networks:
-      - beetexting-token-service_default     # Join the Token Service's network
-
-networks:
-  beetexting-token-service_default:
-    external: true                           # Created by the Token Service stack
+```
+Your service  ──(internal JWT/JWE)──▶  Message-Sending Service  ──▶  (everything else)
 ```
 
-**Sibling's code:**
+The Message Service takes care of:
+
+- Authenticating your request (internal JWT/JWE)
+- Calling this Token Service to fetch a fresh BEEtexting Bearer + API key
+- Calling BEEtexting's SMS API with the right headers
+- Handling retries, delivery status, and (in the future) multimedia attachments
+
+Your code in a sibling service should look like this:
 
 ```python
 import httpx, os
 
-response = httpx.get(f"{os.environ['TOKEN_SERVICE_URL']}/api/v1/token")
-data = response.json()
-
-token   = data["access_token"]   # → Authorization: Bearer <token>
-api_key = data["api_key"]        # → x-api-key: <api_key>
+# Send via the Message Service — it proxies everything behind the scenes.
+response = httpx.post(
+    f"{os.environ['MESSAGE_SERVICE_URL']}/send",
+    headers={"Authorization": f"Bearer {internal_jwt}"},
+    json={"to": "+1XXXXXXXXXX", "text": "Hello!"},
+)
+response.raise_for_status()
 ```
 
-### Scenario 2 — Caller is a plain process on the host (no container)
+No knowledge of BEEtexting, no token fetching, no credential handling. Clean.
 
-If something runs directly on the EC2 host (a cron job, a shell script, a one-off Python process), it reaches the service via the loopback interface:
+### For the Message-Sending Service — how to call us
 
-```python
-import httpx
+The Message Service is currently the **only** caller of this Token Service. Here's how it reaches us:
 
-response = httpx.get("http://127.0.0.1:8100/api/v1/token")
-data = response.json()
+**On the same Docker host (production)** — join the external network `beetexting-token-service_default` and use the container DNS name:
 
-token   = data["access_token"]
-api_key = data["api_key"]
-expires = data["expires_at_utc"]    # know when it goes stale
+```yaml
+# message-sending-service/docker-compose.yml
+services:
+  message-service:
+    environment:
+      BEETEXTING_TOKEN_SERVICE_URL: http://beetexting-token-service:8100
+    networks:
+      - beetexting-token-service_default
+
+networks:
+  beetexting-token-service_default:
+    external: true
 ```
 
-### Full example — send an SMS via BEEtexting
-
-Once you have the token + api_key from either scenario above:
-
 ```python
-sms_response = httpx.post(
+import httpx, os
+
+resp = httpx.get(f"{os.environ['BEETEXTING_TOKEN_SERVICE_URL']}/api/v1/token")
+data = resp.json()
+
+token   = data["access_token"]      # → Authorization: Bearer <token>
+api_key = data["api_key"]           # → x-api-key: <api_key>
+expires = data["expires_at_utc"]    # optional — for logging / metrics
+
+# Now call BEEtexting directly
+httpx.post(
     "https://connect.beetexting.com/prod/message/sendsms",
     headers={
         "Authorization": f"Bearer {token}",
@@ -297,10 +318,16 @@ sms_response = httpx.post(
     },
     params={
         "from": "+1XXXXXXXXXX",
-        "to": "+1XXXXXXXXXX",
-        "text": "Hello from the microservice!",
+        "to":   "+1XXXXXXXXXX",
+        "text": "Hello from the Message Service!",
     },
 )
+```
+
+**As a local dev or cron job on the host** (rare) — use the loopback interface instead:
+
+```python
+httpx.get("http://127.0.0.1:8100/api/v1/token")
 ```
 
 ---

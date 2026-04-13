@@ -65,12 +65,11 @@ jobs:
         run: uv run python -m compileall -q src main.py
 
       - name: Run tests
-        env:
-          # Stub credentials so Settings validation passes in CI
-          # (tests mock every external HTTP call; these values are never used on the wire).
-          BEETEXTING_CLIENT_ID: ci-client-id
-          BEETEXTING_CLIENT_SECRET: ci-client-secret
-          BEETEXTING_API_KEY: ci-api-key
+        # No BEETEXTING env vars here — every test either constructs Settings()
+        # with explicit kwargs or injects a fake settings singleton before the
+        # app is built.  Setting env vars globally breaks the
+        # test_missing_required_field_rejected test because pydantic-settings
+        # reads from the process environment even when _env_file=None.
         run: uv run pytest -v
 
   # ────────────────────────────────────────────────────────────────────────

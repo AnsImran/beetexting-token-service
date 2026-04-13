@@ -8,7 +8,7 @@ so nothing ever touches the real BEEtexting API.
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from beetexting_token_service.config import Settings
+from src.core.config import Settings
 
 
 @pytest.fixture()
@@ -35,8 +35,8 @@ async def test_client(fake_settings: Settings):
     """
     # Import late so module-level code doesn't run before fixtures
     # Override the settings singleton so the app picks up fake values
-    import beetexting_token_service.config as config_module
-    from beetexting_token_service.app import create_app
+    import src.core.config as config_module
+    from src.app import create_app
     original = config_module._settings
     config_module._settings = fake_settings
 

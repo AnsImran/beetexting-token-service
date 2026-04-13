@@ -8,11 +8,11 @@ from datetime import UTC, datetime, timedelta
 
 from httpx import ASGITransport, AsyncClient
 
-import beetexting_token_service.config as config_module
-from beetexting_token_service.api.v1.router import set_token_manager
-from beetexting_token_service.app import create_app
-from beetexting_token_service.config import Settings
-from beetexting_token_service.exceptions import TokenNotAvailableError
+import src.core.config as config_module
+from src.api.v1.router import set_token_manager
+from src.app import create_app
+from src.core.config import Settings
+from src.core.exceptions import TokenNotAvailableError
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 

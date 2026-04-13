@@ -2,7 +2,7 @@
 
 import pytest
 
-from beetexting_token_service.config import Settings
+from src.core.config import Settings
 
 
 class TestSettings:
@@ -40,6 +40,7 @@ class TestSettings:
         """Omitting a required field must raise a validation error."""
         with pytest.raises(Exception):
             Settings(
+                _env_file=None,  # block .env so the missing field isn't filled
                 beetexting_client_id="id",
                 # beetexting_client_secret missing
                 beetexting_api_key="key",

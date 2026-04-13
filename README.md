@@ -325,6 +325,71 @@ uv run ruff check src/ tests/
 
 ![Project Structure Diagram](docs/project_structure.png)
 
+> The diagram above is rendered from the Mermaid source below. GitHub renders it natively; for offline viewing re-run `python docs/render_project_structure.py`.
+
+```mermaid
+flowchart TB
+    main["<b>main.py</b><br/>Entrypoint<br/>(uvicorn startup)"]
+
+    subgraph SRC["src/"]
+        direction TB
+        app["<b>app.py</b><br/>FastAPI factory<br/>Lifespan mgmt"]
+
+        subgraph CORE["core/ — cross-cutting"]
+            direction LR
+            config["config.py<br/>Pydantic Settings"]
+            exceptions["exceptions.py<br/>Errors + handlers"]
+            logging["logging_config.py<br/>UTC logging"]
+        end
+
+        subgraph SCHEMAS["schemas/ — Pydantic v2 models"]
+            direction LR
+            s_token["token.py<br/>BeeTextingTokenResponse<br/>CachedToken<br/>TokenResponse"]
+            s_health["health.py<br/>HealthResponse"]
+            s_errors["errors.py<br/>ErrorResponse"]
+        end
+
+        subgraph SERVICES["services/ — business logic"]
+            tm["token_manager.py<br/>TokenManager<br/>(fetch / cache / refresh)"]
+        end
+
+        subgraph API["api/v1/ — HTTP layer"]
+            router["router.py<br/>/token  /health  /ping"]
+        end
+    end
+
+    main --> app
+    app --> config
+    app --> exceptions
+    app --> logging
+    app --> tm
+    app --> router
+
+    tm --> config
+    tm --> exceptions
+    tm --> s_token
+
+    router --> config
+    router --> tm
+    router --> s_token
+    router --> s_health
+    router --> s_errors
+
+    classDef entry fill:#7C3AED,stroke:#1E3A5F,color:#fff,font-weight:bold
+    classDef core fill:#059669,stroke:#1E3A5F,color:#fff
+    classDef schemas fill:#EC4899,stroke:#1E3A5F,color:#fff
+    classDef services fill:#F59E0B,stroke:#1E3A5F,color:#1E3A5F,font-weight:bold
+    classDef api fill:#6366F1,stroke:#1E3A5F,color:#fff
+    classDef app fill:#3B7DD8,stroke:#1E3A5F,color:#fff,font-weight:bold
+
+    class main entry
+    class app app
+    class config,exceptions,logging core
+    class s_token,s_health,s_errors schemas
+    class tm services
+    class router api
+```
+
 ```
 beetexting_token_service/
 ├── main.py                                  # Entrypoint (uvicorn startup)

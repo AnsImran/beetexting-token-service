@@ -1,9 +1,10 @@
 """
-Pydantic v2 schemas for API request/response validation.
+Token-related Pydantic v2 schemas.
 
-These models define the exact shape of every JSON body that enters or leaves
-the service.  FastAPI uses them for automatic validation, serialisation,
-and OpenAPI documentation.
+These models cover everything in the token domain:
+- ``BeeTextingTokenResponse``: validates upstream JSON from BEEtexting's OAuth2 endpoint.
+- ``CachedToken``: the immutable, in-memory token state held by TokenManager.
+- ``TokenResponse``: the outbound API response returned by ``GET /api/v1/token``.
 """
 
 from datetime import UTC, datetime
@@ -123,29 +124,7 @@ class CachedToken(BaseModel):
         return datetime.now(UTC) >= self.expires_at_utc
 
 
-# ── Health check ────────────────────────────────────────────────────────────
-
-
-class HealthResponse(BaseModel):
-    """Response returned by the ``/health`` endpoint."""
-
-    status: str = Field(
-        ...,
-        description="Overall service health: 'healthy' or 'degraded'.",
-        examples=["healthy"],
-    )
-    has_valid_token: bool = Field(
-        ...,
-        description="Whether the service currently holds a usable BEEtexting token.",
-    )
-    token_expires_at_utc: datetime | None = Field(
-        default=None,
-        description="UTC expiry time of the current token, or null if no token exists.",
-        examples=["2026-04-11T13:00:00+00:00"],
-    )
-
-
-# ── Token response ──────────────────────────────────────────────────────────
+# ── Outbound API response ──────────────────────────────────────────────────
 
 
 class TokenResponse(BaseModel):
@@ -176,24 +155,3 @@ class TokenResponse(BaseModel):
         ...,
         description="The x-api-key header value required alongside the Bearer token.",
     )
-
-
-# ── Error response (for OpenAPI docs) ──────────────────────────────────────
-
-
-class ErrorDetail(BaseModel):
-    """Inner error object with code and message."""
-
-    code: int = Field(..., description="HTTP status code.", examples=[502])
-    message: str = Field(
-        ...,
-        description="Human-readable error description.",
-        examples=["Failed to fetch token from BEEtexting."],
-    )
-
-
-class ErrorResponse(BaseModel):
-    """Standard error envelope returned on any failure."""
-
-    ok: bool = Field(default=False)
-    error: ErrorDetail

@@ -8,8 +8,8 @@ Run with:
 
 import uvicorn
 
-from beetexting_token_service.app import create_app
-from beetexting_token_service.config import get_settings
+from src.app import create_app
+from src.core.config import get_settings
 
 # Module-level app object so ``uvicorn main:app`` works
 app = create_app()

@@ -97,15 +97,23 @@ class Settings(BaseSettings):
         default="INFO",
         description="Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL).",
     )
+    access_log_level: str = Field(
+        default="INFO",
+        description=(
+            "Logging level for uvicorn's HTTP access log "
+            "(per-request 'GET /... 200 OK' lines).  Use INFO in dev to "
+            "see every request, WARNING in prod to keep logs clean."
+        ),
+    )
 
-    @field_validator("log_level")
+    @field_validator("log_level", "access_log_level")
     @classmethod
     def _normalise_log_level(cls, value: str) -> str:
         """Ensure the log level is always upper-case and valid."""
         normalised = value.upper()
         valid = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
         if normalised not in valid:
-            raise ValueError(f"log_level must be one of {valid}, got '{value}'")
+            raise ValueError(f"log level must be one of {valid}, got '{value}'")
         return normalised
 
 

@@ -19,9 +19,9 @@ from datetime import UTC, datetime, timedelta
 import httpx
 from pydantic import ValidationError
 
-from beetexting_token_service.config import Settings
-from beetexting_token_service.exceptions import TokenFetchError, TokenNotAvailableError
-from beetexting_token_service.schemas import BeeTextingTokenResponse, CachedToken
+from src.core.config import Settings
+from src.core.exceptions import TokenFetchError, TokenNotAvailableError
+from src.schemas.token import BeeTextingTokenResponse, CachedToken
 
 logger = logging.getLogger(__name__)
 

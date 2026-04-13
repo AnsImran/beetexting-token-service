@@ -24,11 +24,13 @@ class _UTCFormatter(logging.Formatter):
         return utc_now.isoformat(timespec="milliseconds")
 
 
-def setup_logging(level: str = "INFO") -> None:
+def setup_logging(level: str = "INFO", access_log_level: str = "INFO") -> None:
     """Configure the root logger for the application.
 
     Args:
-        level: Logging level string (e.g. "INFO", "DEBUG").
+        level: Main application logging level (e.g. "INFO", "DEBUG").
+        access_log_level: Level for uvicorn's HTTP access log. INFO shows
+            every incoming request; WARNING hides them for quieter production logs.
     """
     # Format: 2026-04-11T12:34:56.789+00:00 | INFO | module:func:42 | message
     formatter = _UTCFormatter(
@@ -47,4 +49,4 @@ def setup_logging(level: str = "INFO") -> None:
     # Quiet down noisy third-party loggers
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
-    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+    logging.getLogger("uvicorn.access").setLevel(access_log_level)

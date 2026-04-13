@@ -11,9 +11,11 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
-from beetexting_token_service.config import Settings, get_settings
-from beetexting_token_service.schemas import ErrorResponse, HealthResponse, TokenResponse
-from beetexting_token_service.token_manager import TokenManager
+from src.core.config import Settings, get_settings
+from src.schemas.errors import ErrorResponse
+from src.schemas.health import HealthResponse
+from src.schemas.token import TokenResponse
+from src.services.token_manager import TokenManager
 
 logger = logging.getLogger(__name__)
 

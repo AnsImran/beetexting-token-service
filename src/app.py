@@ -14,12 +14,12 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from beetexting_token_service.api.v1.router import router as v1_router
-from beetexting_token_service.api.v1.router import set_token_manager
-from beetexting_token_service.config import get_settings
-from beetexting_token_service.exceptions import register_error_handlers
-from beetexting_token_service.logging_config import setup_logging
-from beetexting_token_service.token_manager import TokenManager
+from src.api.v1.router import router as v1_router
+from src.api.v1.router import set_token_manager
+from src.core.config import get_settings
+from src.core.exceptions import register_error_handlers
+from src.core.logging_config import setup_logging
+from src.services.token_manager import TokenManager
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         1. Stop the TokenManager (cancel background task, close HTTP client).
     """
     settings = get_settings()
-    setup_logging(level=settings.log_level)
+    setup_logging(level=settings.log_level, access_log_level=settings.access_log_level)
 
     logger.info("=== BEEtexting Token Service starting ===")
     logger.info(

@@ -14,6 +14,12 @@ dependencies = [
     "prometheus-fastapi-instrumentator>=7.0",
     "opentelemetry-distro>=0.48b0",
     "opentelemetry-exporter-otlp>=1.27.0",
+    # Explicit auto-instrumentors — listing them here ensures `uv sync`
+    # installs them (uv venvs ship without pip so the typical
+    # `opentelemetry-bootstrap -a install` step silently no-ops).
+    "opentelemetry-instrumentation-fastapi>=0.48b0",
+    "opentelemetry-instrumentation-httpx>=0.48b0",
+    "opentelemetry-instrumentation-logging>=0.48b0",
 ]
 
 [project.optional-dependencies]

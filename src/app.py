@@ -13,6 +13,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from prometheus_fastapi_instrumentator import Instrumentator
 
 from src.api.v1.router import router as v1_router
 from src.api.v1.router import set_token_manager
@@ -79,5 +80,16 @@ def create_app() -> FastAPI:
     # Wire up error handlers and routes
     register_error_handlers(app)
     app.include_router(v1_router)
+
+    # Prometheus metrics (§38)
+    Instrumentator(
+        excluded_handlers=[
+            "/metrics",
+            ".*/health.*",
+            ".*/healthz",
+            ".*/readyz",
+            ".*/ping",
+        ],
+    ).instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
 
     return app

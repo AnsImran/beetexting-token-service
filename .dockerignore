@@ -36,7 +36,8 @@ htmlcov/
 
 # ── uv ─────────────────────────────────────────────────────────────────────
 .uv/
-uv.lock
+# uv.lock IS needed in the build context so `uv sync --frozen` in the
+# Dockerfile reproduces the same env CI runs.
 
 # ── Docs (not needed at runtime) ───────────────────────────────────────────
 docs/

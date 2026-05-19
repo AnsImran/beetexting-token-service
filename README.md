@@ -826,3 +826,24 @@ The script extracts every ```` ```mermaid ```` block from `README.md` in order, 
 | | CI/CD | GitHub Actions | — |
 | | Image registry | GitHub Container Registry (GHCR) | — |
 | | Production host | AWS EC2 (Ubuntu 24.04 LTS) | — |
+
+---
+
+## Deployment & observability (EC2)
+
+Production runs as a Docker container on a single EC2 host, deployed by GitHub Actions, observed by a shared Prometheus + Grafana + Tempo + Loki stack. Local dev is unaffected.
+
+### Containerization
+- **`Dockerfile`** — `python:3.12-slim`; deps via `uv sync --frozen --no-dev --no-install-project` from `pyproject.toml` + `uv.lock` (no dep drift across local/CI/prod; replaced an earlier hand-curated `pip install` list that silently went stale). `CMD` is wrapped with `opentelemetry-instrument` (inert unless `OTEL_*` env vars are set).
+- **`docker-compose.yml`** references the CI-built GHCR image **`ghcr.io/ansimran/beetexting-token-service/token-service:latest`** with a `build:` fallback.
+- **`.dockerignore`** excludes secrets, tests, docs, `.github/`.
+
+### CI/CD — `.github/workflows/ci.yml`
+On push to `main`: **test** → **build-and-push** (GHCR, registry-cached) → **deploy** (SSH to EC2, `git reset --hard origin/main`, `docker login ghcr.io`, `docker compose pull && up -d`, health-check). Secrets: `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`, `GHCR_USER`, `GHCR_TOKEN` (+ `DEPLOY_GIT_PATH` where used). Docs-only pushes skip via `paths-ignore`.
+
+### EC2 topology
+Container joins external Docker network **`observability-net`** (services resolve each other by name; Prometheus scrapes them). An EC2-side `docker-compose.override.yml` (gitignored, not in this repo) injects `OTEL_*` env vars + `WLS_LOG_FILE` and joins that network; committed compose stays environment-agnostic. Container name on EC2: **`beetexting-token-service`**, internal port **`8100`**.
+
+### Observability
+- **Phase 1 — metrics:** `/metrics` via `prometheus-fastapi-instrumentator`; Prometheus scrape job / `OTEL_SERVICE_NAME`: **`beetexting-token-service`**.
+- **Phase 2 — traces + logs:** `opentelemetry-instrument` auto-instruments FastAPI + httpx → OTLP → OTel Collector → **Tempo**. JSON logs → `WLS_LOG_FILE` → **Promtail** → **Loki**; `OTEL_PYTHON_LOG_CORRELATION=true` adds `otelTraceID` for trace⇄log jumps. Explicit `opentelemetry-instrumentation-fastapi/-httpx/-logging` are pinned in `pyproject.toml` (uv venvs ship without `pip`, so `opentelemetry-bootstrap -a install` silently no-ops).
